@@ -310,11 +310,12 @@ def repack_wheel(
     # 5. regenerate RECORD (its own entry last, with empty hash)
     entries[record_path] = _build_record(entries, record_path)
 
-    # 6. deterministic output filename
-    source_name = source_wheel.name
-    if SOURCE_ABI_TAG not in source_name:
-        raise ValueError(f"source filename lacks {SOURCE_ABI_TAG}: {source_name}")
-    output_name = source_name.replace(SOURCE_ABI_TAG, TARGET_ABI_TAG)
+    # 6. canonical output filename derived from wheel metadata (the source
+    #    file itself may be named arbitrarily, e.g. "upstream.whl" in CI)
+    dist_stem = dist_info[: -len(".dist-info")]
+    distribution, _, dist_version = dist_stem.rpartition("-")
+    escaped_name = re.sub(r"[^\w.]+", "_", distribution)
+    output_name = f"{escaped_name}-{dist_version}-{target_tag}.whl"
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / output_name
 
@@ -327,7 +328,7 @@ def repack_wheel(
             info.external_attr = 0o644 << 16
             out.writestr(info, entries[name])
 
-    print(f"source : {source_name}")
+    print(f"source : {source_wheel.name}")
     print(f"  tag  : {source_tag}")
     print(f"  drop : {', '.join(removed)}")
     print(f"  add  : {SHIM_WHEEL_PATH} ({shim_path.name})")

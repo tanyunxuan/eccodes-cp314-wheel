@@ -110,7 +110,9 @@ jobs:
 
   verify:
     name: Verify ${{ matrix.platform }} on Python 3.14
-    needs: repack
+    needs:
+      - discover
+      - repack
     runs-on: ${{ matrix.runner }}
     env:
       VERIFY_VARIANT: repack

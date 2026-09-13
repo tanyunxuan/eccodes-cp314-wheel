@@ -1,0 +1,290 @@
+name: Repackage eccodes for cp314
+
+# Weekly run follows the newest upstream eccodes release automatically;
+# it can also be triggered manually. Every run rebuilds the wheels and runs
+# the full verification suite: a release is only published when every
+# verification job passes.
+on:
+  schedule:
+    - cron: "17 6 * * 1" # every Monday 06:17 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: repack-eccodes-cp314
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    name: Discover newest cp313 wheels on PyPI
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Query PyPI
+        run: |
+          python tools/repack.py discover --matrix-file matrix.json
+          echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+        id: set-matrix
+
+      - name: Upload build matrix
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-matrix
+          path: matrix.json
+          retention-days: 7
+
+  repack:
+    name: Repack ${{ matrix.platform }} (${{ matrix.version }})
+    needs: discover
+    runs-on: ubuntu-latest # wheel is a zip archive; repacking is platform-independent
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Download official cp313 wheel
+        run: |
+          set -euxo pipefail
+          curl --fail --location --retry 3 --output upstream.whl '${{ matrix.url }}'
+          python - <<'PY'
+          import zipfile
+          with zipfile.ZipFile("upstream.whl") as archive:
+              bad = archive.testzip()
+          assert bad is None, f"corrupt wheel entry: {bad}"
+          print("downloaded wheel integrity OK")
+          PY
+
+      - name: Repackage as cp314
+        run: python tools/repack.py repack --wheel upstream.whl --out-dir dist
+
+      - name: Sanity check the new wheel
+        run: |
+          python - <<'PY'
+          import sys, zipfile
+          path = sys.argv[1]
+          with zipfile.ZipFile(path) as archive:
+              assert archive.testzip() is None
+              names = set(archive.namelist())
+              wheel_meta = next(n for n in names if n.endswith(".dist-info/WHEEL"))
+              tag = [
+                  line for line in archive.read(wheel_meta).decode().splitlines()
+                  if line.startswith("Tag:")
+              ]
+              assert tag == ["Tag: cp314-cp314-${{ matrix.platform }}"], tag
+              assert "eccodes/_eccodes.py" in names
+              assert not [n for n in names if "/_eccodes.cp313" in n or "_eccodes.cpython-313" in n]
+          print("repackaged wheel metadata OK:", tag)
+          PY
+          echo "wheel=$(ls dist/*.whl)" >> "$GITHUB_OUTPUT"
+          ls -la dist/
+
+      - name: Upload repackaged wheel
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheel-${{ matrix.platform }}
+          path: dist/*.whl
+          retention-days: 30
+
+  verify:
+    name: Verify ${{ matrix.platform }} on Python 3.14
+    needs: repack
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERIFY_VARIANT: repack
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Download repackaged wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: wheel-${{ matrix.platform }}
+          path: dist
+
+      - name: Show native library linkage (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          python -m pip install -U pip
+          python -m pip install --only-binary=:all: dist/*.whl
+          python - <<'PY'
+          import glob, os, eccodes
+          libs = os.path.join(os.path.dirname(eccodes.__file__), "..", "eccodes.libs")
+          for so in glob.glob(os.path.join(libs, "*.so*")):
+              os.system(f"objdump -p '{so}' | grep -E 'NEEDED|RUNPATH|RPATH' || true")
+          PY
+
+      - name: Install wheel with cfgrib and xarray
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install -U pip
+          python -m pip install --only-binary=:all: dist/*.whl cfgrib xarray
+          python -m pip list
+
+      - name: Run GRIB2 round-trip verification
+        shell: bash
+        run: |
+          set -o pipefail
+          python tests/verify_grib2.py 2>&1 | tee "verify-${{ matrix.platform }}.log"
+
+      - name: Upload verification log
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: verifylog-${{ matrix.platform }}
+          path: verify-${{ matrix.platform }}.log
+          retention-days: 90
+
+  verify-official-linux:
+    # Reference check: on Linux, ECMWF itself now ships cp314 native libs
+    # through the separate "eccodeslib" package. Make sure that official
+    # path keeps working with the same acceptance test.
+    name: Verify official eccodeslib cp314 path (Linux)
+    needs: discover
+    runs-on: ubuntu-latest
+    env:
+      VERIFY_VARIANT: official
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Install official eccodes + eccodeslib, cfgrib and xarray
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install -U pip
+          python -m pip install --only-binary=:all: eccodes cfgrib xarray
+          python -m pip list
+
+      - name: Run GRIB2 round-trip verification
+        shell: bash
+        run: |
+          set -o pipefail
+          python tests/verify_grib2.py 2>&1 | tee verify-official-linux.log
+
+      - name: Upload verification log
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: verifylog-official-linux
+          path: verify-official-linux.log
+          retention-days: 90
+
+  release:
+    name: Publish wheels to GitHub Releases
+    needs:
+      - verify
+      - verify-official-linux
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Download all verified artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: "wheel-*"
+          path: dist
+          merge-multiple: true
+
+      - name: Download all verification logs
+        uses: actions/download-artifact@v8
+        with:
+          pattern: "verifylog-*"
+          path: logs
+          merge-multiple: true
+
+      - name: Create or update per-version releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          ls -la dist logs
+
+          for wheel in dist/*.whl; do
+            base=$(basename "$wheel")
+            version=$(python -c 'import sys; print(sys.argv[1].split("-")[1])' "$base")
+            platform=$(python -c 'import sys; print(sys.argv[1].split("-")[4].removesuffix(".whl"))' "$base")
+            tag="v${version}"
+            logfile="logs/verify-${platform}.log"
+            checksum=$(sha256sum "$wheel" | awk '{print $1}')
+
+            attachments=("$wheel")
+            if [[ -f "$logfile" ]]; then
+                attachments+=("$logfile")
+            fi
+
+            if gh release view "$tag" >/dev/null 2>&1; then
+              if gh release view "$tag" --json assets --jq '.assets[].name' | grep -Fxq "$base"; then
+                echo "::notice::$base already attached to $tag - nothing to do"
+                continue
+              fi
+              gh release upload "$tag" "${attachments[@]}" --clobber
+              echo "uploaded new assets to $tag"
+            else
+              cat > release-notes.md <<EOF
+          ## eccodes ${version} repackaged for CPython 3.14
+
+          Unofficial repack of the official ECMWF \`eccodes\` ${version} cp313
+          binary wheel (platform: ${platform}). No C source is compiled and no
+          upstream Python file is modified: the cp313 compiled glue extension
+          is replaced by a pure-Python ctypes shim and the wheel tag is changed
+          to \`cp314-cp314-${platform}\`. The bundled ecCodes native libraries
+          are byte-identical to the official PyPI wheel.
+
+          | item | value |
+          | --- | --- |
+          | wheel | \`${base}\` |
+          | sha256 | \`${checksum}\` |
+          | upstream | https://pypi.org/project/eccodes/${version}/ |
+          | verification log | attached as \`verify-${platform}.log\` |
+
+          Install with:
+
+          \`\`\`
+          pip install https://github.com/${{ github.repository }}/releases/download/${tag}/${base}
+          \`\`\`
+
+          See the repository README for background and the official
+          Linux \`eccodeslib\` alternative.
+          EOF
+              gh release create "$tag" "${attachments[@]}" \
+                --title "eccodes ${version} (cp314 repack)" \
+                --notes-file release-notes.md
+              echo "created $tag"
+            fi
+          done

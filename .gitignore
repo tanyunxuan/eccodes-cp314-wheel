@@ -1,0 +1,19 @@
+# Local research / downloaded upstream artifacts
+/research/
+/dist/
+*.whl
+matrix.json
+release-notes.md
+
+# Python
+__pycache__/
+*.py[cod]
+.venv*/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store

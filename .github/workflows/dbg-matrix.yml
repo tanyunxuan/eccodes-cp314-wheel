@@ -1,0 +1,43 @@
+name: DBG matrix expansion
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  v1-dynamic-runner-env-if:
+    name: "v1 ${{ matrix.platform }}"
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERIFY_VARIANT: repack
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: win_dbg
+            runner: windows-latest
+          - platform: linux_dbg
+            runner: ubuntu-latest
+    steps:
+      - if: runner.os == 'Linux'
+        shell: bash
+        run: echo linux-only
+      - shell: bash
+        run: echo "hello ${{ matrix.platform }}"
+
+  v2-whole-object:
+    name: "v2 ${{ matrix.platform }}"
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix: ${{ fromJson('{"include":[{"platform":"win_dbg","runner":"windows-latest"},{"platform":"linux_dbg","runner":"ubuntu-latest"}]}') }}
+    steps:
+      - shell: bash
+        run: echo "hello ${{ matrix.platform }}"
+
+  v3-static-runs-on:
+    name: "v3 ${{ matrix.platform }}"
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: [a, b]
+    steps:
+      - run: echo hi
